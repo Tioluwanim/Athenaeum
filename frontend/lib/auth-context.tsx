@@ -18,7 +18,7 @@ import {
   signOut as firebaseSignOut,
   type User,
 } from "firebase/auth";
-import { auth } from "@/lib/firebase";
+import { getFirebaseAuth } from "@/lib/firebase";
 
 interface AuthContextValue {
   user: User | null;
@@ -38,7 +38,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
+    // Only runs in the browser — safe to touch Firebase here.
+    const unsubscribe = onAuthStateChanged(getFirebaseAuth(), (u) => {
       setUser(u);
       setLoading(false);
     });
@@ -46,29 +47,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const getIdToken = async () => {
+    const auth = getFirebaseAuth();
     if (!auth.currentUser) return null;
     return auth.currentUser.getIdToken();
   };
 
   const signInWithEmail = async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email, password);
+    await signInWithEmailAndPassword(getFirebaseAuth(), email, password);
   };
 
   const registerWithEmail = async (email: string, password: string) => {
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
+    const cred = await createUserWithEmailAndPassword(getFirebaseAuth(), email, password);
     await sendEmailVerification(cred.user);
   };
 
   const signInWithGoogle = async () => {
-    await signInWithPopup(auth, new GoogleAuthProvider());
+    await signInWithPopup(getFirebaseAuth(), new GoogleAuthProvider());
   };
 
   const resetPassword = async (email: string) => {
-    await sendPasswordResetEmail(auth, email);
+    await sendPasswordResetEmail(getFirebaseAuth(), email);
   };
 
   const signOut = async () => {
-    await firebaseSignOut(auth);
+    await firebaseSignOut(getFirebaseAuth());
   };
 
   return (
