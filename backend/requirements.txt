@@ -1,0 +1,52 @@
+streamlit>=1.32.0,<2.0.0
+python-dotenv>=1.0.0
+pydantic>=2.6.0,<3.0.0
+SQLAlchemy>=2.0.0,<3.0.0
+alembic>=1.13.0,<2.0.0
+psycopg[binary]
+
+PyMuPDF>=1.23.0,<2.0.0
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+Pillow>=10.0.0,<12.0.0
+
+numpy>=1.26.0,<2.0.0
+faiss-cpu>=1.8.0
+
+# Embeddings / NLP stack
+sentence-transformers>=3.0.0,<4.0.0
+transformers>=4.41.0,<5.0.0
+torch>=2.4.0
+huggingface-hub>=0.25.0,<1.0.0
+safetensors>=0.4.0
+
+# Export / files / HTTP
+openpyxl>=3.1.0
+python-docx>=1.1.0
+requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2024.2.2
+
+# LLM client
+openai>=1.30.0
+
+# ── v2 rebuild additions ────────────────────────────────────────────────
+# API layer
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
+python-multipart>=0.0.9        # required by FastAPI for UploadFile
+
+# Auth
+firebase-admin>=6.5.0,<7.0.0
+
+# Object storage (Cloudflare R2, S3-compatible)
+boto3>=1.34.0
+
+# Hybrid retrieval + reranking
+rank-bm25>=0.2.2
+# CrossEncoder reranking reuses sentence-transformers, already required above
+
+# Research orchestration (optional — rag_graph.py degrades gracefully
+# to a plain async pipeline if this isn't installed)
+langgraph>=0.2.0
+
