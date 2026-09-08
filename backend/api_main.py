@@ -211,6 +211,64 @@ def get_document_file(doc_id: str, user: CurrentUser = Depends(get_current_user)
     return Response(content=data, media_type="application/pdf")
 
 
+@app.get("/api/documents/{doc_id}/sections")
+def get_document_sections(doc_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Structural breakdown of a document — Abstract / Methods / Results /
+    etc. as distinct blocks, the way the old Streamlit UI surfaced them.
+    Pulled straight from document_sections; no re-processing involved."""
+    processed = repository.load_processed_document(doc_id)
+    if not processed:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return [
+        {
+            "section_type": s.section_type.value,
+            "title": s.title,
+            "content": s.content,
+            "page_start": s.page_start,
+            "page_end": s.page_end,
+            "word_count": s.word_count,
+        }
+        for s in processed.sections
+    ]
+
+
+# ── Export (Word / Excel) ─────────────────────────────────────────────────
+
+class ExportRequest(BaseModel):
+    doc_ids: list[str]
+    template: str = "journal"  # "journal" | "thesis"
+
+
+@app.post("/api/export/xlsx")
+def export_xlsx(body: ExportRequest, user: CurrentUser = Depends(get_current_user)):
+    from fastapi.responses import Response as _Response
+    from app.services.export_service import export_service
+    try:
+        data, filename = export_service.export_xlsx(body.doc_ids, template=body.template)
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return _Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/export/docx")
+def export_docx(body: ExportRequest, user: CurrentUser = Depends(get_current_user)):
+    from fastapi.responses import Response as _Response
+    from app.services.export_service import export_service
+    try:
+        data, filename = export_service.export_docx(body.doc_ids, template=body.template)
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return _Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: str, user: CurrentUser = Depends(require_admin)):
     ok = analysis_service.delete_document(doc_id)
