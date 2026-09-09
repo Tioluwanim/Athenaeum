@@ -126,7 +126,49 @@ class PDFService:
                     error="Conversion failed",
                     detail=f"Could not convert '{filename}' to PDF: {e}",
                 )
+            # ── PPTX ──────────────────────────────────────────────────────────────────
+    if suffix == ".pptx":
+        try:
+            from pptx import Presentation
+            prs   = Presentation(_io.BytesIO(file_bytes))
+            parts : list[str] = []
 
+            # Put a clean, single-line title first so the downstream title
+            # heuristic (which just reads the first substantial line of text)
+            # picks up the deck's actual title instead of a slide marker or
+            # the first bullet point. Prefer explicit doc properties; fall
+            # back to the first slide's title placeholder.
+            deck_title = (prs.core_properties.title or "").strip()
+            if not deck_title and prs.slides:
+                first_slide = prs.slides[0]
+                if first_slide.shapes.title and first_slide.shapes.title.text.strip():
+                    deck_title = first_slide.shapes.title.text.strip()
+            if deck_title:
+                parts.append(deck_title)
+
+            for i, slide in enumerate(prs.slides, start=1):
+                slide_lines = [f"--- Slide {i} ---"]
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            line = "".join(run.text for run in para.runs).strip()
+                            if line:
+                                slide_lines.append(line)
+                    if shape.has_table:
+                        for row in shape.table.rows:
+                            row_text = "  |  ".join(
+                                c.text.strip() for c in row.cells if c.text.strip()
+                            )
+                            if row_text:
+                                slide_lines.append(row_text)
+                # Speaker notes carry real content in a lot of research/teaching decks
+                if slide.has_notes_slide and slide.notes_slide.notes_text_frame.text.strip():
+                    slide_lines.append(f"[Notes] {slide.notes_slide.notes_text_frame.text.strip()}")
+                if len(slide_lines) > 1:
+                    parts.append("\n".join(slide_lines))
+            return "\n\n".join(parts)
+        except ImportError:
+            raise RuntimeError("python-pptx not installed. Add it to requirements.txt.")
         # ── Validate PDF magic bytes ──────────────────────────────────────────
         if not file_bytes.startswith(b"%PDF"):
             return None, ErrorResponse(
