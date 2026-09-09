@@ -37,6 +37,15 @@ export interface UploadResult {
   duplicate_of?: string | null;
 }
 
+export interface DocumentSection {
+  section_type: string;
+  title: string;
+  content: string;
+  page_start: number;
+  page_end: number;
+  word_count: number;
+}
+
 class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -80,6 +89,50 @@ export const api = {
 
   deleteDocument: (token: string | null, docId: string) =>
     request<{ status: string }>(`/api/documents/${docId}`, token, { method: "DELETE" }),
+
+  getSections: (token: string | null, docId: string) =>
+    request<DocumentSection[]>(`/api/documents/${docId}/sections`, token),
+
+  /** Triggers a browser download of the export file — returns nothing,
+   * navigates the browser via a temporary anchor click. */
+  exportDocuments: async (
+    token: string | null,
+    docIds: string[],
+    format: "xlsx" | "docx",
+    template: "journal" | "thesis" = "journal"
+  ) => {
+    const res = await fetch(`${API_BASE}/api/export/${format}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ doc_ids: docIds, template }),
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = body.detail || detail;
+      } catch {
+        // ignore
+      }
+      throw new ApiError(res.status, detail);
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match?.[1] || `export.${format}`;
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 
   uploadDocuments: async (token: string | null, files: File[]): Promise<UploadResult[]> => {
     const form = new FormData();
