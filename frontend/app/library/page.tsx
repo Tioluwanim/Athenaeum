@@ -5,14 +5,16 @@ import { Search as SearchIcon, Library as LibraryIcon, AlertTriangle, CheckSquar
 import { AppShell } from "@/components/app-shell";
 import { UploadDropzone } from "@/components/library/upload-dropzone";
 import { DocumentCard } from "@/components/library/document-card";
+import { PromoteToAdminCard } from "@/components/admin/promote-to-admin-card";
 import { useAuth } from "@/lib/auth-context";
-import { api, type DocumentSummary, ApiError } from "@/lib/api";
+import { api, type DocumentSummary, type CurrentUser, ApiError } from "@/lib/api";
 
 const PROCESSING_STATES = new Set(["uploaded", "processing"]);
 
 export default function LibraryPage() {
   const { getIdToken } = useAuth();
   const [documents, setDocuments] = useState<DocumentSummary[] | null>(null);
+  const [me, setMe] = useState<CurrentUser | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -21,6 +23,15 @@ export default function LibraryPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState<"xlsx" | "docx" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  const loadMe = useCallback(async () => {
+    try {
+      const token = await getIdToken();
+      setMe(await api.me(token));
+    } catch {
+      // Non-fatal — upload controls just stay hidden until this resolves.
+    }
+  }, [getIdToken]);
 
   const load = useCallback(async () => {
     try {
@@ -35,7 +46,8 @@ export default function LibraryPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+    loadMe();
+  }, [load, loadMe]);
 
   // Poll while anything is still processing, so cards update to "Ready"
   // without the user needing to refresh.
@@ -140,9 +152,17 @@ export default function LibraryPage() {
           </div>
         </div>
 
-        <div className="mt-8">
-          <UploadDropzone onFiles={handleUpload} uploading={uploading} />
-        </div>
+        {me && me.role !== "admin" && (
+          <div className="mt-8">
+            <PromoteToAdminCard onPromoted={loadMe} />
+          </div>
+        )}
+
+        {me?.role === "admin" && (
+          <div className="mt-8">
+            <UploadDropzone onFiles={handleUpload} uploading={uploading} />
+          </div>
+        )}
 
         {error && (
           <div className="mt-6 flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
