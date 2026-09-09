@@ -1,5 +1,14 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
+export interface CurrentUser {
+  id: number;
+  firebase_uid: string;
+  email: string;
+  full_name: string;
+  role: "admin" | "staff";
+  email_verified: boolean;
+}
+
 export interface DocumentSummary {
   doc_id: string;
   filename: string;
@@ -203,7 +212,7 @@ export const api = {
   libraryStats: (token: string | null) =>
     request<Record<string, unknown>>("/api/library/stats", token),
 
-  me: (token: string | null) => request<Record<string, unknown>>("/api/auth/me", token),
+  me: (token: string | null) => request<CurrentUser>("/api/auth/me", token),,
 
   promoteToAdmin: (token: string | null, inviteCode: string) =>
     request<{ status: string }>("/api/auth/promote-to-admin", token, {
