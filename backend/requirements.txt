@@ -4,7 +4,7 @@ pydantic>=2.6.0,<3.0.0
 SQLAlchemy>=2.0.0,<3.0.0
 alembic>=1.13.0,<2.0.0
 psycopg[binary]
-python-pptx>=1.0.0
+
 PyMuPDF>=1.23.0,<2.0.0
 pytesseract>=0.3.10
 pdf2image>=1.17.0
@@ -14,15 +14,31 @@ numpy>=1.26.0,<2.0.0
 faiss-cpu>=1.8.0
 
 # Embeddings / NLP stack
-sentence-transformers>=3.0.0,<4.0.0
-transformers>=4.41.0,<5.0.0
-torch>=2.4.0
-huggingface-hub>=0.25.0,<1.0.0
-safetensors>=0.4.0
+# torch + sentence-transformers + transformers REMOVED (v3): embeddings now
+# call the HuggingFace Inference API (embedding_service.py) instead of
+# loading a model in-process. This was the actual cause of documents
+# getting stuck on "Queued" — the combined RAM of torch + the model
+# exceeded a small Render instance's memory and silently killed the whole
+# server process mid-request.
+#
+# Side effect: hybrid_retrieval.py's CrossEncoderReranker also depended on
+# sentence-transformers (for cross-encoder reranking of search results).
+# It already degrades gracefully without it (catches the ImportError, logs
+# a warning, returns results unranked-but-still-fused) — hybrid search
+# still works fully via vector + BM25 + reciprocal rank fusion, it just
+# skips that one extra reranking pass. Re-add sentence-transformers below
+# if you upgrade to a Render plan with more RAM and want that reranking
+# quality back.
+# sentence-transformers>=3.0.0,<4.0.0
+# transformers>=4.41.0,<5.0.0
+# torch>=2.4.0
+# huggingface-hub / safetensors also removed — were only transitive deps
+# of the packages above, nothing imports them directly.
 
 # Export / files / HTTP
 openpyxl>=3.1.0
 python-docx>=1.1.0
+python-pptx>=1.0.0
 requests>=2.31.0
 urllib3>=2.0.0
 certifi>=2024.2.2
@@ -49,4 +65,3 @@ rank-bm25>=0.2.2
 # Research orchestration (optional — rag_graph.py degrades gracefully
 # to a plain async pipeline if this isn't installed)
 langgraph>=0.2.0
-
