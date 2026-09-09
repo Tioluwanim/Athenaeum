@@ -662,6 +662,7 @@ ALLOWED_EXTENSIONS = {
     ".pdf",
     ".docx",
     ".doc",
+    ".pptx",
     ".txt",
     ".xlsx",
     ".xls",
