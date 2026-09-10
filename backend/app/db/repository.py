@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.db.models import (
     ChatMessage,
     ChatSession,
+    Collection,
     Document,
     DocumentChunk,
     DocumentSection,
@@ -158,13 +159,24 @@ class Repository:
             stmt = select(Document).where(Document.drive_file_id == drive_file_id)
             return session.execute(stmt).scalar_one_or_none()
 
-    def list_documents(self) -> list[dict]:
+    def list_documents(self, collection_id: int | None = None) -> list[dict]:
         with self.session() as session:
             stmt = select(Document).order_by(Document.updated_at.desc())
+            if collection_id is not None:
+                stmt = stmt.where(Document.collection_id == collection_id)
             docs = session.execute(stmt).scalars().all()
             return [self._summary_from_record(doc) for doc in docs]
 
     def _summary_from_record(self, doc: Document) -> dict:
+        word_count = len((doc.full_text or "").split())
+        avg_words_per_page = (word_count / doc.page_count) if doc.page_count else word_count
+        # Heuristic, not a stored flag: a "ready" document with almost no
+        # extractable text per page is very likely a scanned image PDF that
+        # OCR couldn't run on (tesseract not installed on this server) —
+        # surfaced here from data already on the record, no migration needed.
+        likely_scanned = (
+            doc.status == "ready" and doc.page_count > 0 and avg_words_per_page < 15
+        )
         return {
             "doc_id": doc.doc_id,
             "filename": doc.filename,
@@ -178,6 +190,9 @@ class Repository:
             "created_at": doc.created_at.isoformat() if doc.created_at else "",
             "drive_file_id": doc.drive_file_id,
             "last_error": doc.last_error,
+            "collection_id": doc.collection_id,
+            "collection_name": doc.collection.name if doc.collection else None,
+            "likely_scanned": likely_scanned,
         }
 
     def update_document(
@@ -731,6 +746,183 @@ class Repository:
         with self.session() as session:
             stmt = select(DocumentChunk).where(DocumentChunk.id.in_(list(chunk_ids)))
             return session.execute(stmt).scalars().all()
+
+    # ── Chat / research history ──────────────────────────────────────────
+    # Persists research Q&A so "Continue research" in the UI actually means
+    # something — previously every answer vanished on page refresh even
+    # though these tables already existed in the schema, unused.
+
+    def create_chat_session(
+        self, user_id: int, document_id: int | None = None, name: str | None = None,
+    ) -> ChatSession:
+        with self.session() as session:
+            record = ChatSession(
+                user_id=user_id, document_id=document_id, name=name,
+                created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            session.expunge(record)
+            return record
+
+    def add_chat_message(
+        self, session_id: int, role: str, content: str,
+        provider: str | None = None, model: str | None = None,
+        citations_json: str | None = None,
+    ) -> ChatMessage:
+        with self.session() as session:
+            msg = ChatMessage(
+                session_id=session_id, role=role, content=content,
+                provider=provider, model=model, citations_json=citations_json,
+                created_at=datetime.utcnow(),
+            )
+            session.add(msg)
+            # bump session.updated_at so recency ordering reflects last activity
+            chat_session = session.get(ChatSession, session_id)
+            if chat_session:
+                chat_session.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(msg)
+            session.expunge(msg)
+            return msg
+
+    def list_chat_sessions(
+        self, user_id: int, document_id: int | None = None, limit: int = 50,
+    ) -> list[ChatSession]:
+        """Ownership-scoped by design — a session belongs to the user who
+        started it; no cross-user visibility, admin or not, since research
+        questions can be personal (thesis topics, exam prep, etc.)."""
+        with self.session() as session:
+            stmt = select(ChatSession).where(ChatSession.user_id == user_id)
+            if document_id is not None:
+                stmt = stmt.where(ChatSession.document_id == document_id)
+            else:
+                stmt = stmt.where(ChatSession.document_id.is_(None))
+            stmt = stmt.order_by(ChatSession.updated_at.desc()).limit(limit)
+            return session.execute(stmt).scalars().all()
+
+    def get_chat_session_with_messages(
+        self, session_id: int, user_id: int,
+    ) -> ChatSession | None:
+        """Returns None if the session doesn't exist OR belongs to a
+        different user — same shape either way so callers can't probe for
+        which case it is."""
+        with self.session() as session:
+            stmt = (
+                select(ChatSession)
+                .options(selectinload(ChatSession.messages))
+                .where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+            )
+            record = session.execute(stmt).scalar_one_or_none()
+            if record:
+                # cascade="all, delete-orphan" on ChatSession.messages means
+                # "all" includes expunge — expunging the parent already
+                # detaches every child message too. An explicit per-message
+                # expunge() loop here double-expunges and raises
+                # InvalidRequestError ("not present in this Session").
+                session.expunge(record)
+            return record
+
+    def delete_chat_session(self, session_id: int, user_id: int) -> bool:
+        with self.session() as session:
+            record = session.execute(
+                select(ChatSession).where(ChatSession.id == session_id, ChatSession.user_id == user_id)
+            ).scalar_one_or_none()
+            if not record:
+                return False
+            session.delete(record)
+            session.commit()
+            return True
+
+    # ── Collections ───────────────────────────────────────────────────────
+    # One collection per document (FK on Document, not a join table) — see
+    # the docstring on the Collection model for why.
+
+    def create_collection(
+        self, name: str, description: str = "", color: str | None = None,
+        created_by: int | None = None,
+    ) -> Collection:
+        with self.session() as session:
+            record = Collection(
+                name=name, description=description, color=color, created_by=created_by,
+                created_at=datetime.utcnow(), updated_at=datetime.utcnow(),
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            session.expunge(record)
+            return record
+
+    def list_collections(self) -> list[dict]:
+        """Returns collections with a live document count each — the count
+        is what makes a collection list actually useful at a glance rather
+        than just names."""
+        with self.session() as session:
+            stmt = select(Collection).order_by(Collection.name)
+            collections = session.execute(stmt).scalars().all()
+            result = []
+            for c in collections:
+                count = session.execute(
+                    select(func.count(Document.id)).where(Document.collection_id == c.id)
+                ).scalar_one()
+                result.append({
+                    "id": c.id, "name": c.name, "description": c.description,
+                    "color": c.color, "document_count": count,
+                    "created_at": c.created_at.isoformat(), "updated_at": c.updated_at.isoformat(),
+                })
+            return result
+
+    def get_collection(self, collection_id: int) -> Collection | None:
+        with self.session() as session:
+            record = session.get(Collection, collection_id)
+            if record:
+                session.expunge(record)
+            return record
+
+    def update_collection(
+        self, collection_id: int, name: str | None = None,
+        description: str | None = None, color: str | None = None,
+    ) -> Collection | None:
+        with self.session() as session:
+            record = session.get(Collection, collection_id)
+            if not record:
+                return None
+            if name is not None:
+                record.name = name
+            if description is not None:
+                record.description = description
+            if color is not None:
+                record.color = color
+            record.updated_at = datetime.utcnow()
+            session.commit()
+            session.refresh(record)
+            session.expunge(record)
+            return record
+
+    def delete_collection(self, collection_id: int) -> bool:
+        """Deletes the collection; documents inside it are NOT deleted —
+        their collection_id just reverts to NULL (ON DELETE SET NULL on
+        the FK), so nothing in the library disappears, it just becomes
+        unfiled again."""
+        with self.session() as session:
+            record = session.get(Collection, collection_id)
+            if not record:
+                return False
+            session.delete(record)
+            session.commit()
+            return True
+
+    def set_document_collection(self, doc_id: str, collection_id: int | None) -> bool:
+        with self.session() as session:
+            record = session.execute(
+                select(Document).where(Document.doc_id == doc_id)
+            ).scalar_one_or_none()
+            if not record:
+                return False
+            record.collection_id = collection_id
+            session.commit()
+            return True
 
 
 repository = Repository()
