@@ -11,6 +11,19 @@ export interface DocumentSummary {
   year: string;
   updated_at: string;
   last_error?: string | null;
+  collection_id: number | null;
+  collection_name: string | null;
+  likely_scanned: boolean;
+}
+
+export interface Collection {
+  id: number;
+  name: string;
+  description: string;
+  color: string | null;
+  document_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Citation {
@@ -24,10 +37,32 @@ export interface Citation {
 }
 
 export interface ResearchResult {
+  session_id: number;
   answer: string;
   citations: Citation[];
   provider_used: string;
   timings_ms: Record<string, number>;
+}
+
+export interface ChatSession {
+  id: number;
+  name: string | null;
+  document_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessageOut {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  provider?: string | null;
+  citations: Citation[];
+  created_at: string;
+}
+
+export interface ChatSessionDetail extends ChatSession {
+  messages: ChatMessageOut[];
 }
 
 export interface UploadResult {
@@ -90,14 +125,46 @@ async function request<T>(
 }
 
 export const api = {
-  listDocuments: (token: string | null) =>
-    request<DocumentSummary[]>("/api/documents", token),
+  listDocuments: (token: string | null, collectionId?: number) => {
+    const params = collectionId !== undefined ? `?collection_id=${collectionId}` : "";
+    return request<DocumentSummary[]>(`/api/documents${params}`, token);
+  },
+
+  listCollections: (token: string | null) =>
+    request<Collection[]>("/api/collections", token),
+
+  createCollection: (token: string | null, name: string, description = "", color?: string) =>
+    request<Collection>("/api/collections", token, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, description, color: color ?? null }),
+    }),
+
+  updateCollection: (token: string | null, id: number, patch: { name?: string; description?: string; color?: string }) =>
+    request<Collection>(`/api/collections/${id}`, token, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+
+  deleteCollection: (token: string | null, id: number) =>
+    request<{ status: string }>(`/api/collections/${id}`, token, { method: "DELETE" }),
+
+  assignDocumentCollection: (token: string | null, docId: string, collectionId: number | null) =>
+    request<{ status: string }>(`/api/documents/${docId}/collection`, token, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ collection_id: collectionId }),
+    }),
 
   getDocument: (token: string | null, docId: string) =>
     request<Record<string, unknown>>(`/api/documents/${docId}`, token),
 
   deleteDocument: (token: string | null, docId: string) =>
     request<{ status: string }>(`/api/documents/${docId}`, token, { method: "DELETE" }),
+
+  reprocessDocument: (token: string | null, docId: string) =>
+    request<{ status: string }>(`/api/documents/${docId}/reprocess`, token, { method: "POST" }),
 
   getSections: (token: string | null, docId: string) =>
     request<DocumentSection[]>(`/api/documents/${docId}/sections`, token),
@@ -164,11 +231,11 @@ export const api = {
     );
   },
 
-  research: (token: string | null, query: string, docId?: string) =>
+  research: (token: string | null, query: string, docId?: string, sessionId?: number) =>
     request<ResearchResult>("/api/research", token, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, doc_id: docId ?? null }),
+      body: JSON.stringify({ query, doc_id: docId ?? null, session_id: sessionId ?? null }),
     }),
 
   /** Streams newline-delimited JSON progress events, then the final result. */
@@ -176,7 +243,8 @@ export const api = {
     token: string | null,
     query: string,
     docId: string | undefined,
-    onEvent: (event: { event: string; [key: string]: unknown }) => void
+    onEvent: (event: { event: string; [key: string]: unknown }) => void,
+    sessionId?: number
   ) => {
     const res = await fetch(`${API_BASE}/api/research/stream`, {
       method: "POST",
@@ -184,7 +252,7 @@ export const api = {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ query, doc_id: docId ?? null }),
+      body: JSON.stringify({ query, doc_id: docId ?? null, session_id: sessionId ?? null }),
     });
     if (!res.ok || !res.body) throw new ApiError(res.status, await res.text());
 
@@ -211,6 +279,17 @@ export const api = {
 
   libraryStats: (token: string | null) =>
     request<Record<string, unknown>>("/api/library/stats", token),
+
+  listChatSessions: (token: string | null, docId?: string) => {
+    const params = docId ? `?doc_id=${encodeURIComponent(docId)}` : "";
+    return request<ChatSession[]>(`/api/chat/sessions${params}`, token);
+  },
+
+  getChatSession: (token: string | null, sessionId: number) =>
+    request<ChatSessionDetail>(`/api/chat/sessions/${sessionId}`, token),
+
+  deleteChatSession: (token: string | null, sessionId: number) =>
+    request<{ status: string }>(`/api/chat/sessions/${sessionId}`, token, { method: "DELETE" }),
 
   me: (token: string | null) => request<CurrentUser>("/api/auth/me", token),
 
