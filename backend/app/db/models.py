@@ -41,6 +41,8 @@ class Document(Base):
     chunk_count       = Column(Integer,      default=0,   nullable=False)
     source_folder     = Column(String(512),  nullable=True)
     source            = Column(String(64),   default="upload", nullable=True)
+    collection_id     = Column(Integer,      ForeignKey("collections.id", ondelete="SET NULL"),
+                               nullable=True, index=True)
     last_error        = Column(Text,         nullable=True)
     file_size_bytes   = Column(Integer,      default=0,   nullable=False)
     authors           = Column(JSON,         default=list, nullable=False)
@@ -74,6 +76,7 @@ class Document(Base):
                                   cascade="all, delete-orphan")
     chat_sessions  = relationship("ChatSession",      back_populates="document",
                                   cascade="all, delete-orphan")
+    collection     = relationship("Collection",       back_populates="documents")
 
 
 class DocumentVersion(Base):
@@ -249,6 +252,31 @@ class User(Base):
     chat_sessions = relationship("ChatSession", back_populates="user")
 
 
+class Collection(Base):
+    """
+    A named grouping of documents — 'folder' in user-facing language.
+    Deliberately one-collection-per-document (a simple FK on Document,
+    not a many-to-many join table) rather than tags: a library shelf
+    metaphor is one physical location per book, and that constraint keeps
+    the UI (and this model) simple. Move to a join table later if the
+    library genuinely needs a document to live in multiple collections
+    at once — nothing else in the schema would need to change to add one.
+    """
+    __tablename__ = "collections"
+    __table_args__ = {"extend_existing": True}
+
+    id          = Column(Integer,      primary_key=True)
+    name        = Column(String(256),  nullable=False)
+    description = Column(String(1024), default="", nullable=False)
+    color       = Column(String(16),   nullable=True)  # optional UI accent, e.g. "#c98f34"
+    created_by  = Column(Integer,      ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at  = Column(DateTime,     default=datetime.utcnow, nullable=False)
+    updated_at  = Column(DateTime,     default=datetime.utcnow,
+                         onupdate=datetime.utcnow, nullable=False)
+
+    documents = relationship("Document", back_populates="collection")
+
+
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
     __table_args__ = {"extend_existing": True}
@@ -260,6 +288,7 @@ class ChatMessage(Base):
     content    = Column(Text,        nullable=False)
     provider   = Column(String(64),  nullable=True)
     model      = Column(String(128), nullable=True)
+    citations_json = Column(Text,    nullable=True)  # JSON-serialized list[Citation]
     created_at = Column(DateTime,    default=datetime.utcnow, nullable=False)
 
     session = relationship("ChatSession", back_populates="messages")
