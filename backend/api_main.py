@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from app.auth import CurrentUser, get_current_user, require_admin
 from app.config_ext import ADMIN_INVITE_CODE, CORS_ALLOWED_ORIGINS
-from app.db.repository import init_db, repository
+from app.db.repository import repository
 from app.services.analysis_service import analysis_service
 from app.services.hybrid_retrieval import hybrid_search
 from app.services.model_router import model_router
@@ -35,7 +35,14 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    init_db()
+    # NOT calling init_db() (Base.metadata.create_all) here anymore — it
+    # was silently creating tables outside Alembic's migration tracking,
+    # which then collided with `alembic upgrade head` in the Dockerfile's
+    # startup command (DuplicateTable: relation "documents" already exists).
+    # Alembic is now the single source of truth for schema — migrations
+    # run once, before the app process starts (see Dockerfile CMD), never
+    # from inside the app itself. init_db() still exists for tests, which
+    # use a disposable SQLite DB with no migration history to protect.
     logger.info("API startup complete — model providers: %s", model_router.status())
     yield
 
