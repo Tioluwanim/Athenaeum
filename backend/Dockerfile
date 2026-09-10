@@ -28,9 +28,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN chmod +x docker-entrypoint.sh
 
 # Render sets $PORT at runtime; default to 8000 for local `docker run`.
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn api_main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["./docker-entrypoint.sh"]
