@@ -95,6 +95,35 @@ class DocumentOut(BaseModel):
     year: str = ""
     updated_at: str = ""
     last_error: Optional[str] = None
+    collection_id: Optional[int] = None
+    collection_name: Optional[str] = None
+    likely_scanned: bool = False
+
+
+class CollectionOut(BaseModel):
+    id: int
+    name: str
+    description: str = ""
+    color: Optional[str] = None
+    document_count: int = 0
+    created_at: str
+    updated_at: str
+
+
+class CollectionCreate(BaseModel):
+    name: str
+    description: str = ""
+    color: Optional[str] = None
+
+
+class CollectionUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    color: Optional[str] = None
+
+
+class AssignCollectionRequest(BaseModel):
+    collection_id: Optional[int] = None  # null unassigns (back to "unfiled")
 
 
 class UploadResult(BaseModel):
@@ -107,6 +136,7 @@ class UploadResult(BaseModel):
 class ResearchRequest(BaseModel):
     query: str
     doc_id: Optional[str] = None
+    session_id: Optional[int] = None  # continue an existing research session; omit to start a new one
 
 
 class CitationOut(BaseModel):
@@ -120,10 +150,32 @@ class CitationOut(BaseModel):
 
 
 class ResearchResult(BaseModel):
+    session_id: int
     answer: str
     citations: list[CitationOut]
     provider_used: str
     timings_ms: dict[str, int]
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    role: str
+    content: str
+    provider: Optional[str] = None
+    citations: list[CitationOut] = []
+    created_at: str
+
+
+class ChatSessionOut(BaseModel):
+    id: int
+    name: Optional[str] = None
+    document_id: Optional[int] = None
+    created_at: str
+    updated_at: str
+
+
+class ChatSessionDetailOut(ChatSessionOut):
+    messages: list[ChatMessageOut] = []
 
 
 # ── Health / monitoring ──────────────────────────────────────────────────
@@ -168,11 +220,51 @@ def promote_to_admin(body: PromoteRequest, user: CurrentUser = Depends(get_curre
     return {"status": "promoted"}
 
 
+# ── Collections ──────────────────────────────────────────────────────────
+
+@app.get("/api/collections", response_model=list[CollectionOut])
+def list_collections(user: CurrentUser = Depends(get_current_user)):
+    return [CollectionOut(**c) for c in repository.list_collections()]
+
+
+@app.post("/api/collections", response_model=CollectionOut)
+def create_collection(body: CollectionCreate, user: CurrentUser = Depends(require_admin)):
+    c = repository.create_collection(
+        name=body.name, description=body.description, color=body.color, created_by=user.id,
+    )
+    return CollectionOut(
+        id=c.id, name=c.name, description=c.description, color=c.color,
+        document_count=0, created_at=c.created_at.isoformat(), updated_at=c.updated_at.isoformat(),
+    )
+
+
+@app.patch("/api/collections/{collection_id}", response_model=CollectionOut)
+def update_collection(collection_id: int, body: CollectionUpdate, user: CurrentUser = Depends(require_admin)):
+    c = repository.update_collection(
+        collection_id, name=body.name, description=body.description, color=body.color,
+    )
+    if not c:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    counted = next((x for x in repository.list_collections() if x["id"] == collection_id), None)
+    return CollectionOut(**counted) if counted else CollectionOut(
+        id=c.id, name=c.name, description=c.description, color=c.color,
+        document_count=0, created_at=c.created_at.isoformat(), updated_at=c.updated_at.isoformat(),
+    )
+
+
+@app.delete("/api/collections/{collection_id}")
+def delete_collection(collection_id: int, user: CurrentUser = Depends(require_admin)):
+    ok = repository.delete_collection(collection_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return {"status": "deleted"}
+
+
 # ── Documents ────────────────────────────────────────────────────────────
 
 @app.get("/api/documents", response_model=list[DocumentOut])
-def list_documents(user: CurrentUser = Depends(get_current_user)):
-    docs = analysis_service.list_documents()
+def list_documents(collection_id: Optional[int] = None, user: CurrentUser = Depends(get_current_user)):
+    docs = analysis_service.list_documents(collection_id=collection_id)
     return [
         DocumentOut(
             doc_id=d["doc_id"], filename=d["filename"], title=d.get("title", ""),
@@ -180,9 +272,21 @@ def list_documents(user: CurrentUser = Depends(get_current_user)):
             chunk_count=d.get("chunks", 0), authors=d.get("authors") or [],
             year=d.get("year", ""), updated_at=str(d.get("updated_at", "")),
             last_error=d.get("last_error"),
+            collection_id=d.get("collection_id"), collection_name=d.get("collection_name"),
+            likely_scanned=d.get("likely_scanned", False),
         )
         for d in docs
     ]
+
+
+@app.patch("/api/documents/{doc_id}/collection")
+def assign_document_collection(
+    doc_id: str, body: AssignCollectionRequest, user: CurrentUser = Depends(require_admin),
+):
+    ok = repository.set_document_collection(doc_id, body.collection_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "updated"}
 
 
 @app.get("/api/documents/{doc_id}")
@@ -277,11 +381,32 @@ def delete_document(doc_id: str, user: CurrentUser = Depends(require_admin)):
     return {"status": "deleted"}
 
 
-def _process_document_background(doc_id: str) -> None:
+def _process_document_background(doc_id: str, reprocess: bool = False) -> None:
     try:
-        analysis_service.process_document(doc_id)
+        analysis_service.process_document(doc_id, reprocess=reprocess)
     except Exception as e:  # noqa: BLE001
         logger.error("Background processing failed for %s: %s", doc_id, e, exc_info=True)
+
+
+@app.post("/api/documents/{doc_id}/reprocess")
+def reprocess_document(
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    user: CurrentUser = Depends(require_admin),
+):
+    """Re-runs extraction → chunking → embedding for a document that's
+    stuck (e.g. the server restarted mid-processing, commonly from an OOM
+    on a small hosting plan while loading the embedding model) or that
+    failed. Safe to call on any document — process_document(reprocess=True)
+    re-runs the full pipeline regardless of current status."""
+    # get_document_info() returns {"error": ...} rather than None for a
+    # missing doc (that's non-empty, so `if not info` never fires) — use
+    # load_document() instead, the same check delete/file already use.
+    doc = pdf_service.load_document(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    background_tasks.add_task(_process_document_background, doc_id, True)
+    return {"status": "reprocessing"}
 
 
 @app.post("/api/documents/upload", response_model=list[UploadResult])
@@ -344,10 +469,44 @@ def search(q: str, doc_id: Optional[str] = None, top_k: int = 8, user: CurrentUs
 
 # ── Research (the core "ask a question, get a cited answer" flow) ───────
 
+def _resolve_session(user: CurrentUser, body: ResearchRequest):
+    """Continues an existing session (ownership-checked) or starts a new
+    one, named from the first query so the history list is scannable
+    rather than a wall of timestamps."""
+    if body.session_id is not None:
+        existing = repository.get_chat_session_with_messages(body.session_id, user.id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Research session not found")
+        return existing
+
+    document_row = repository.get_document_by_doc_id(body.doc_id) if body.doc_id else None
+    name = body.query.strip()[:80]
+    return repository.create_chat_session(
+        user_id=user.id,
+        document_id=document_row.id if document_row else None,
+        name=name,
+    )
+
+
+def _persist_turn(session_id: int, query: str, state: dict) -> None:
+    repository.add_chat_message(session_id, role="user", content=query)
+    citations = state.get("citations", [])
+    repository.add_chat_message(
+        session_id,
+        role="assistant",
+        content=state.get("answer", ""),
+        provider=state.get("provider_used", "none"),
+        citations_json=json.dumps([c.model_dump() for c in citations]) if citations else None,
+    )
+
+
 @app.post("/api/research", response_model=ResearchResult)
 async def research(body: ResearchRequest, user: CurrentUser = Depends(get_current_user)):
+    session = _resolve_session(user, body)
     state = await run_research(query=body.query, doc_id=body.doc_id)
+    _persist_turn(session.id, body.query, state)
     return ResearchResult(
+        session_id=session.id,
         answer=state.get("answer", ""),
         citations=[CitationOut(**c.model_dump()) for c in state.get("citations", [])],
         provider_used=state.get("provider_used", "none"),
@@ -360,20 +519,68 @@ async def research_stream(body: ResearchRequest, user: CurrentUser = Depends(get
     """Streams research progress as newline-delimited JSON events, then the
     final answer — powers the frontend's 'Research Progress' UI (rewrite →
     retrieve → grade → generate stages) instead of a single opaque wait."""
+    session = _resolve_session(user, body)
 
     async def event_stream():
         def emit(event: str, **data):
             return json.dumps({"event": event, **data}) + "\n"
 
-        yield emit("stage", stage="searching", label="Searching the library…")
+        yield emit("stage", stage="searching", label="Searching the library…", session_id=session.id)
         state = await run_research(query=body.query, doc_id=body.doc_id)
+        _persist_turn(session.id, body.query, state)
         yield emit("stage", stage="done", label="Answer ready", timings_ms=state.get("timings_ms", {}))
 
         citations = [c.model_dump() for c in state.get("citations", [])]
-        yield emit("result", answer=state.get("answer", ""), citations=citations,
+        yield emit("result", session_id=session.id, answer=state.get("answer", ""), citations=citations,
                     provider_used=state.get("provider_used", "none"))
 
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+# ── Research history ──────────────────────────────────────────────────────
+
+@app.get("/api/chat/sessions", response_model=list[ChatSessionOut])
+def list_chat_sessions(doc_id: Optional[str] = None, user: CurrentUser = Depends(get_current_user)):
+    document_row = repository.get_document_by_doc_id(doc_id) if doc_id else None
+    sessions = repository.list_chat_sessions(
+        user_id=user.id,
+        document_id=document_row.id if document_row else None,
+    )
+    return [
+        ChatSessionOut(
+            id=s.id, name=s.name, document_id=s.document_id,
+            created_at=s.created_at.isoformat(), updated_at=s.updated_at.isoformat(),
+        )
+        for s in sessions
+    ]
+
+
+@app.get("/api/chat/sessions/{session_id}", response_model=ChatSessionDetailOut)
+def get_chat_session(session_id: int, user: CurrentUser = Depends(get_current_user)):
+    session = repository.get_chat_session_with_messages(session_id, user.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Research session not found")
+    messages = []
+    for m in sorted(session.messages, key=lambda m: m.created_at):
+        citations = json.loads(m.citations_json) if m.citations_json else []
+        messages.append(ChatMessageOut(
+            id=m.id, role=m.role, content=m.content, provider=m.provider,
+            citations=[CitationOut(**c) for c in citations],
+            created_at=m.created_at.isoformat(),
+        ))
+    return ChatSessionDetailOut(
+        id=session.id, name=session.name, document_id=session.document_id,
+        created_at=session.created_at.isoformat(), updated_at=session.updated_at.isoformat(),
+        messages=messages,
+    )
+
+
+@app.delete("/api/chat/sessions/{session_id}")
+def delete_chat_session(session_id: int, user: CurrentUser = Depends(get_current_user)):
+    ok = repository.delete_chat_session(session_id, user.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Research session not found")
+    return {"status": "deleted"}
 
 
 # ── Library stats ────────────────────────────────────────────────────────
